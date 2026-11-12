@@ -12,15 +12,45 @@ namespace mod {
 
 namespace {
 
+#ifndef OT_MODULE_PERF_ROWS
+// A core without Performance FX columns (fork #159): nothing plays over the settings.
+template <int N>
+struct PerfRows {
+    bool any() const { return false; }
+    void over(int, uint8_t&) const {}
+};
+#endif
+
 using audio::dirt::Params;
 
 const ModuleInfo kInfo = {"DIRT", kModuleApi, 100, "Dirt", kCapMasterInsert | kCapSection | kCapPage | kCapEffect, 0, 0, 0, 9000, 1};
 
 audio::dirt::Dirt gDirt;
 bool gDirty = false;
+Params gSaved;       // the page's settings: gDirt plays them with the Performance rows over them
+PerfRows<7> gPerf;   // [I] fork #159
+constexpr uint8_t kLo[7] = {0, 0, 0, 4, 1, 0, 0}, kHi[7] = {1, 3, 100, 16, 32, 100, 100};
+
+uint8_t* field(Params& p, int i) {
+    uint8_t* const f[7] = {&p.on, &p.type, &p.drive, &p.bits, &p.rate, &p.tone, &p.mix};
+    return f[i < 0 || i >= 7 ? 0 : i];
+}
+
+[[gnu::noinline]] void play() {
+    Params p = gSaved;
+    for (int i = 1; i < 7; ++i) gPerf.over(i, *field(p, i));
+    if (gPerf.any()) p.on = 1;
+    gDirt.setParams(p);
+}
+
+[[gnu::noinline]] void keep(const Params& p) {
+    gDirt.setParams(p);   // setParams clamps
+    gSaved = gDirt.params();
+    if (gPerf.any()) play();
+}
 
 void set(const Params& p) {
-    gDirt.setParams(p);
+    keep(p);
     gDirty = true;
 }
 
@@ -33,7 +63,7 @@ public:
     bool dirty() const override { return gDirty; }
     uint32_t encode(uint8_t* buf, uint32_t cap) override {
         gDirty = false;
-        const Params p = gDirt.params();
+        const Params p = gSaved;
         const uint8_t b[8] = {p.on, p.type, p.drive, p.bits, p.rate, p.tone, p.mix, 0};
         const Params d;
         const uint8_t z[8] = {0, d.type, d.drive, d.bits, d.rate, d.tone, d.mix, 0};
@@ -45,12 +75,12 @@ public:
         Params p;
         uint8_t* const f[7] = {&p.on, &p.type, &p.drive, &p.bits, &p.rate, &p.tone, &p.mix};
         for (uint32_t i = 0; i < 7 && i < len; ++i) *f[i] = b[i];
-        gDirt.setParams(p);   // setParams clamps
+        keep(p);   // clamped
         gDirty = false;
         return true;
     }
     void reset() override {
-        gDirt.setParams(Params{});
+        keep(Params{});
         gDirty = false;
     }
 };
@@ -60,11 +90,10 @@ class Page final : public IModulePage {
 public:
     const char* title() const override { return "Dirt"; }
     int rows() const override { return 7; }
-    void row(int i, ModuleRow& out) override {
+    [[gnu::noinline]] void row(int i, ModuleRow& out) override {
         static const char* const kLabel[7] = {"Dirt", "Type", "Drive", "Bits", "Rate", "Tone", "Mix"};
-        static const uint8_t kLo[7] = {0, 0, 0, 4, 1, 0, 0}, kHi[7] = {1, 3, 100, 16, 32, 100, 100};
         i = i < 0 || i > 6 ? 0 : i;
-        const Params p = gDirt.params();
+        const Params p = gSaved;
         const uint8_t v[7] = {p.on, p.type, p.drive, p.bits, p.rate, p.tone, p.mix};
         std::snprintf(out.label, sizeof(out.label), "%s", kLabel[i]);
         if (i == 0) std::snprintf(out.value, sizeof(out.value), "%s", p.on ? "On" : "Off");
@@ -74,7 +103,7 @@ public:
         out.bipolar = false;
     }
     void adjust(int i, int d) override {
-        Params p = gDirt.params();
+        Params p = gSaved;
         uint8_t* const f[7] = {&p.on, &p.type, &p.drive, &p.bits, &p.rate, &p.tone, &p.mix};
         if (i < 0 || i > 6) return;
         if (i == 0) {
@@ -85,6 +114,27 @@ public:
         }
         set(p);
     }
+#ifdef OT_MODULE_PERF_ROWS
+    // [I] fork #159: every row but the on row; the text as row() shows it.
+    bool perfRange(int i, int& lo, int& hi) const override {
+        const bool ok = i >= 1 && i < 7;
+        lo = ok ? kLo[i] : 0;
+        hi = ok ? kHi[i] : 0;
+        return ok;
+    }
+    void perfText(int i, int v, char* out, int cap) override {
+        const Params was = gSaved;
+        *field(gSaved, i) = uint8_t(v < 0 ? 0 : v);
+        ModuleRow r;
+        row(i, r);
+        gSaved = was;
+        std::snprintf(out, size_t(cap), "%s", r.value);
+    }
+    void perfPlay(int i, int v) override {
+        const bool ok = i >= 1 && i < 7;
+        if (gPerf.set(i, v, ok ? kLo[i] : 0, ok ? kHi[i] : 0)) play();
+    }
+#endif
 };
 
 Section gSection;
@@ -108,7 +158,7 @@ IModule& dirtModule() { return gModule; }
 
 // Settings API (tests, the module page).
 void dirtSet(const audio::dirt::Params& p) { set(p); }
-audio::dirt::Params dirtGet() { return gDirt.params(); }
+audio::dirt::Params dirtGet() { return gSaved; }
 
 }  // namespace mod
 }  // namespace ot

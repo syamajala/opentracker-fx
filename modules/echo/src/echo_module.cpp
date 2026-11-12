@@ -14,6 +14,15 @@ namespace mod {
 
 namespace {
 
+#ifndef OT_MODULE_PERF_ROWS
+// A core without Performance FX columns (fork #159): nothing plays over the settings.
+template <int N>
+struct PerfRows {
+    bool any() const { return false; }
+    void over(int, uint8_t&) const {}
+};
+#endif
+
 using audio::echo::Params;
 
 const ModuleInfo kInfo = {"ECHO", kModuleApi, 100, "Echo", kCapMasterInsert | kCapSection | kCapPage, 0,
@@ -21,9 +30,30 @@ const ModuleInfo kInfo = {"ECHO", kModuleApi, 100, "Echo", kCapMasterInsert | kC
 
 audio::echo::Echo gEcho;
 bool gDirty = false;
+Params gSaved;       // the page's settings: gEcho plays them with the Performance rows over them
+PerfRows<8> gPerf;   // [I] fork #159
+constexpr uint8_t kHi[8] = {1, audio::echo::kTimes - 1, 100, 100, 100, 1, 100, 100};
+
+uint8_t* field(Params& p, int i) {
+    uint8_t* const f[8] = {&p.on, &p.time, &p.feedback, &p.lowcut, &p.tone, &p.pingpong, &p.duck, &p.mix};
+    return f[i < 0 || i >= 8 ? 0 : i];
+}
+
+[[gnu::noinline]] void play() {
+    Params p = gSaved;
+    for (int i = 1; i < 8; ++i) gPerf.over(i, *field(p, i));
+    if (gPerf.any()) p.on = 1;
+    gEcho.setParams(p);
+}
+
+[[gnu::noinline]] void keep(const Params& p) {
+    gEcho.setParams(p);   // setParams clamps
+    gSaved = gEcho.params();
+    if (gPerf.any()) play();
+}
 
 void set(const Params& p) {
-    gEcho.setParams(p);
+    keep(p);
     gDirty = true;
 }
 
@@ -36,7 +66,7 @@ public:
     bool dirty() const override { return gDirty; }
     uint32_t encode(uint8_t* buf, uint32_t cap) override {
         gDirty = false;
-        const Params p = gEcho.params();
+        const Params p = gSaved;
         const uint8_t b[8] = {p.on, p.time, p.feedback, p.lowcut, p.tone, p.pingpong, p.duck, p.mix};
         const Params d;
         const uint8_t z[8] = {0, d.time, d.feedback, d.lowcut, d.tone, d.pingpong, d.duck, d.mix};
@@ -48,12 +78,12 @@ public:
         Params p;
         uint8_t* const f[8] = {&p.on, &p.time, &p.feedback, &p.lowcut, &p.tone, &p.pingpong, &p.duck, &p.mix};
         for (uint32_t i = 0; i < 8 && i < len; ++i) *f[i] = b[i];
-        gEcho.setParams(p);   // setParams clamps
+        keep(p);   // clamped
         gDirty = false;
         return true;
     }
     void reset() override {
-        gEcho.setParams(Params{});
+        keep(Params{});
         gDirty = false;
     }
 };
@@ -63,11 +93,10 @@ class Page final : public IModulePage {
 public:
     const char* title() const override { return "Echo"; }
     int rows() const override { return 8; }
-    void row(int i, ModuleRow& out) override {
+    [[gnu::noinline]] void row(int i, ModuleRow& out) override {
         static const char* const kLabel[8] = {"Echo", "Time", "Feedback", "Low Cut", "Tone", "Ping-Pong", "Duck", "Mix"};
-        static const uint8_t kHi[8] = {1, audio::echo::kTimes - 1, 100, 100, 100, 1, 100, 100};
         i = i < 0 || i > 7 ? 0 : i;
-        const Params p = gEcho.params();
+        const Params p = gSaved;
         const uint8_t v[8] = {p.on, p.time, p.feedback, p.lowcut, p.tone, p.pingpong, p.duck, p.mix};
         std::snprintf(out.label, sizeof(out.label), "%s", kLabel[i]);
         if (i == 0 || i == 5) {
@@ -83,7 +112,7 @@ public:
         out.bipolar = false;
     }
     void adjust(int i, int d) override {
-        Params p = gEcho.params();
+        Params p = gSaved;
         uint8_t* const f[8] = {&p.on, &p.time, &p.feedback, &p.lowcut, &p.tone, &p.pingpong, &p.duck, &p.mix};
         if (i < 0 || i > 7) return;
         if (i == 0 || i == 5) {
@@ -94,6 +123,31 @@ public:
         }
         set(p);
     }
+#ifdef OT_MODULE_PERF_ROWS
+    // [I] fork #159: every row but the on row; the text as row() shows it.
+    bool perfRange(int i, int& lo, int& hi) const override {
+        const bool ok = i >= 1 && i < 8;
+        lo = 0;
+        hi = ok ? kHi[i] : 0;
+        return ok;
+    }
+    void perfText(int i, int v, char* out, int cap) override {
+        if (i == 1) {   // the division alone: a cell has no room for "(max)"
+            std::snprintf(out, size_t(cap), "%s", audio::echo::kTimeName[v < audio::echo::kTimes ? v : 0]);
+            return;
+        }
+        const Params was = gSaved;
+        *field(gSaved, i) = uint8_t(v < 0 ? 0 : v);
+        ModuleRow r;
+        row(i, r);
+        gSaved = was;
+        std::snprintf(out, size_t(cap), "%s", r.value);
+    }
+    void perfPlay(int i, int v) override {
+        const bool ok = i >= 1 && i < 8;
+        if (gPerf.set(i, v, 0, ok ? kHi[i] : 0)) play();
+    }
+#endif
 };
 
 Section gSection;
@@ -120,7 +174,7 @@ IModule& echoModule() { return gModule; }
 
 // Settings API (tests, the module page).
 void echoSet(const audio::echo::Params& p) { set(p); }
-audio::echo::Params echoGet() { return gEcho.params(); }
+audio::echo::Params echoGet() { return gSaved; }
 
 }  // namespace mod
 }  // namespace ot
