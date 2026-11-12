@@ -11,6 +11,15 @@ namespace mod {
 
 namespace {
 
+#ifndef OT_MODULE_PERF_ROWS
+// A core without Performance FX columns (fork #159): nothing plays over the settings.
+template <int N>
+struct PerfRows {
+    bool any() const { return false; }
+    void over(int, uint8_t&) const {}
+};
+#endif
+
 const ModuleInfo kInfo = {"TAPE", kModuleApi, 100, "Tape", kCapMasterInsert | kCapSection | kCapPage, 0, 0, 0, 15000, 1};
 
 // Project data v1: on, drive, wow, flutter, mix, 3 reserved (8 B). Nothing is
@@ -26,9 +35,9 @@ public:
     // Settings page: On, Drive, Wow, Flutter, Mix (Master key cycle).
     const char* title() const override { return "Tape"; }
     int rows() const override { return 5; }
-    void row(int i, ModuleRow& out) override {
+    [[gnu::noinline]] void row(int i, ModuleRow& out) override {
         static const char* const kLabel[5] = {"Tape", "Drive", "Wow", "Flutter", "Mix"};
-        const audio::tape::Params p = tape_.params();
+        const audio::tape::Params p = saved_;
         const uint8_t v[5] = {p.on, p.drive, p.wow, p.flutter, p.mix};
         std::snprintf(out.label, sizeof(out.label), "%s", kLabel[i]);
         if (i == 0) std::snprintf(out.value, sizeof(out.value), "%s", p.on ? "On" : "Off");
@@ -37,7 +46,7 @@ public:
         out.bipolar = false;
     }
     void adjust(int i, int d) override {
-        audio::tape::Params p = tape_.params();
+        audio::tape::Params p = saved_;
         auto step = [d](uint8_t& x) {
             const int n = int(x) + d;
             x = uint8_t(n < 0 ? 0 : (n > 100 ? 100 : n));
@@ -58,7 +67,7 @@ public:
     bool dirty() const override { return dirty_; }
     uint32_t encode(uint8_t* buf, uint32_t cap) override {
         dirty_ = false;
-        const audio::tape::Params p = tape_.params();
+        const audio::tape::Params p = saved_;
         const audio::tape::Params d;
         if (!p.on && p.drive == d.drive && p.wow == d.wow && p.flutter == d.flutter && p.mix == d.mix) return 0;
         if (cap < 8) return 0;
@@ -76,22 +85,63 @@ public:
         take(2, p.wow, 100);
         take(3, p.flutter, 100);
         take(4, p.mix, 100);
-        tape_.setParams(p);
+        keep(p);
         dirty_ = false;
         return true;
     }
     void reset() override {
-        tape_.setParams(audio::tape::Params{});
+        keep(audio::tape::Params{});
         dirty_ = false;
     }
 
     void set(const audio::tape::Params& p) {
-        tape_.setParams(p);
+        keep(p);
         dirty_ = true;
     }
-    audio::tape::Params get() const { return tape_.params(); }
+    audio::tape::Params get() const { return saved_; }
+
+#ifdef OT_MODULE_PERF_ROWS
+    // [I] fork #159: every row but the on row; the text as row() shows it.
+    bool perfRange(int i, int& lo, int& hi) const override {
+        const bool ok = i >= 1 && i < 5;
+        lo = 0;
+        hi = ok ? kHi[i] : 0;
+        return ok;
+    }
+    void perfText(int i, int v, char* out, int cap) override {
+        const audio::tape::Params was = saved_;
+        *field(saved_, i) = uint8_t(v < 0 ? 0 : v);
+        ModuleRow r;
+        row(i, r);
+        saved_ = was;
+        std::snprintf(out, size_t(cap), "%s", r.value);
+    }
+    void perfPlay(int i, int v) override {
+        if (perf_.set(i, v, 0, i >= 1 && i < 5 ? kHi[i] : 0)) play();
+    }
+#endif
 
 private:
+    static constexpr uint8_t kHi[5] = {1, 100, 100, 100, 100};
+    static uint8_t* field(audio::tape::Params& p, int i) {
+        uint8_t* const f[5] = {&p.on, &p.drive, &p.wow, &p.flutter, &p.mix};
+        return f[i < 0 || i >= 5 ? 0 : i];
+    }
+    // The page's settings in saved_; tape_ plays them with the Performance rows over them.
+    [[gnu::noinline]] void play() {
+        audio::tape::Params p = saved_;
+        for (int i = 1; i < 5; ++i) perf_.over(i, *field(p, i));
+        if (perf_.any()) p.on = 1;
+        tape_.setParams(p);
+    }
+    [[gnu::noinline]] void keep(audio::tape::Params p) {
+        for (int i = 0; i < 5; ++i)
+            if (*field(p, i) > kHi[i]) *field(p, i) = kHi[i];
+        saved_ = p;
+        play();
+    }
+    audio::tape::Params saved_;
+    PerfRows<5> perf_;   // [I] fork #159
     audio::tape::Tape tape_;
     bool dirty_ = false;
 };

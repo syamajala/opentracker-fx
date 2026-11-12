@@ -18,6 +18,15 @@ namespace mod {
 
 namespace {
 
+#ifndef OT_MODULE_PERF_ROWS
+// A core without Performance FX columns (fork #159): nothing plays over the settings.
+template <int N>
+struct PerfRows {
+    bool any() const { return false; }
+    void over(int, uint8_t&) const {}
+};
+#endif
+
 const ModuleInfo kInfo = {"BBDC", kModuleApi, 100, "BBD chorus", kCapMasterInsert | kCapSection | kCapPage | kCapEffect, 512, 0, 0, 12000, 1};
 
 #if OT_SLOT_INSERTS
@@ -53,7 +62,7 @@ public:
     bool dirty() const override { return dirty_; }
     uint32_t encode(uint8_t* buf, uint32_t cap) override {
         dirty_ = false;
-        const audio::bbdc::Params p = fx_.params();
+        const audio::bbdc::Params p = saved_;
         const audio::bbdc::Params d;
         if (!p.mode && p.mix == d.mix && p.width == d.width && p.tone == d.tone) return 0;
         if (cap < 8) return 0;
@@ -70,22 +79,22 @@ public:
         take(1, p.mix, 100);
         take(2, p.width, 100);
         take(3, p.tone, 100);
-        fx_.setParams(p);
+        keep(p);
         dirty_ = false;
         return true;
     }
     void reset() override {
-        fx_.setParams(audio::bbdc::Params{});
+        keep(audio::bbdc::Params{});
         dirty_ = false;
     }
 
     // Settings page: Chorus Off / I / II, Mix, Width, Tone (Shift + Master).
     const char* title() const override { return "BBD"; }
     int rows() const override { return 4; }
-    void row(int i, ModuleRow& out) override {
+    [[gnu::noinline]] void row(int i, ModuleRow& out) override {
         static const char* const kLabel[4] = {"Chorus", "Mix", "Width", "Tone"};
         static const char* const kMode[3] = {"Off", "I", "II"};
-        const audio::bbdc::Params p = fx_.params();
+        const audio::bbdc::Params p = saved_;
         const uint8_t v[4] = {p.mode, p.mix, p.width, p.tone};
         std::snprintf(out.label, sizeof(out.label), "%s", kLabel[i]);
         if (i == 0) std::snprintf(out.value, sizeof(out.value), "%s", kMode[p.mode]);
@@ -95,7 +104,7 @@ public:
         out.bipolar = false;
     }
     void adjust(int i, int d) override {
-        audio::bbdc::Params p = fx_.params();
+        audio::bbdc::Params p = saved_;
         auto step = [d](uint8_t& x, int max) {
             const int n = int(x) + d;
             x = uint8_t(n < 0 ? 0 : (n > max ? max : n));
@@ -110,14 +119,54 @@ public:
         set(p);
     }
 
-    void set(audio::bbdc::Params p) {
-        if (p.mode > 2) p.mode = 2;
-        fx_.setParams(p);
+    void set(const audio::bbdc::Params& p) {
+        keep(p);
         dirty_ = true;
     }
-    audio::bbdc::Params get() const { return fx_.params(); }
+    audio::bbdc::Params get() const { return saved_; }
+
+#ifdef OT_MODULE_PERF_ROWS
+    // [I] fork #159: every row but the on row; the text as row() shows it.
+    bool perfRange(int i, int& lo, int& hi) const override {
+        const bool ok = i >= 1 && i < 4;
+        lo = 0;
+        hi = ok ? kHi[i] : 0;
+        return ok;
+    }
+    void perfText(int i, int v, char* out, int cap) override {
+        const audio::bbdc::Params was = saved_;
+        *field(saved_, i) = uint8_t(v < 0 ? 0 : v);
+        ModuleRow r;
+        row(i, r);
+        saved_ = was;
+        std::snprintf(out, size_t(cap), "%s", r.value);
+    }
+    void perfPlay(int i, int v) override {
+        if (perf_.set(i, v, 0, i >= 1 && i < 4 ? kHi[i] : 0)) play();
+    }
+#endif
 
 private:
+    static constexpr uint8_t kHi[4] = {2, 100, 100, 100};
+    static uint8_t* field(audio::bbdc::Params& p, int i) {
+        uint8_t* const f[4] = {&p.mode, &p.mix, &p.width, &p.tone};
+        return f[i < 0 || i >= 4 ? 0 : i];
+    }
+    // The page's settings in saved_; fx_ plays them with the Performance rows over them.
+    [[gnu::noinline]] void play() {
+        audio::bbdc::Params p = saved_;
+        for (int i = 1; i < 4; ++i) perf_.over(i, *field(p, i));
+        if (perf_.any()) p.mode = p.mode ? p.mode : 1;
+        fx_.setParams(p);
+    }
+    [[gnu::noinline]] void keep(audio::bbdc::Params p) {
+        for (int i = 0; i < 4; ++i)
+            if (*field(p, i) > kHi[i]) *field(p, i) = kHi[i];
+        saved_ = p;
+        play();
+    }
+    audio::bbdc::Params saved_;
+    PerfRows<4> perf_;   // [I] fork #159
     audio::bbdc::BbdChorus fx_{gLine};
     bool dirty_ = false;
 };
