@@ -24,6 +24,6 @@ void phaserBench() {
         phaser::gPhaserEffect.process(state, work, s, true, l, r, kBlock);
         sum += otbench::nowUnits() - t0;
     }
-    std::printf("    phas.unit %8.1f  (one stereo block, 80s, Depth / Feedback / Spread 100, limit 12000 M4 insn)\n",
+    std::printf("    phas.unit %8.1f  (one stereo block, 80s, Depth / Feedback / Spread 100, limit 12500 M4 insn)\n",
                 sum / n);
 }
