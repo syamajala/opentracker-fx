@@ -7,7 +7,7 @@ namespace mod {
 
 namespace {
 
-const ModuleInfo kInfo = {"PHSR", kModuleApi, 100, "Phaser", kCapEffect, 0, 0, 0, 12000, 3};
+const ModuleInfo kInfo = {"PHSR", kModuleApi, 100, "Phaser", kCapEffect, 0, 0, 0, 12500, 3};
 
 class Module final : public IModule {
 public:
